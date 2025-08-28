@@ -1,3 +1,17 @@
+# Service and Config files
+*.service
+vod_django.service
+setup_apache.sh
+setup_service.sh
+apache_vod.conf
+servername.conf
+deploy.ps1
+temp_admin.py
+project/vod_settings.py
+
+# Exclude fresh_vod directory
+fresh_vod/
+
 # Python
 __pycache__/
 *.py[cod]

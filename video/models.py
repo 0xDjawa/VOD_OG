@@ -1,6 +1,7 @@
 from django.db import models, transaction
 import subprocess
 import os
+import mysql.connector
 from django.conf import settings
 from datetime import datetime
 from django.core.exceptions import ValidationError
@@ -8,6 +9,7 @@ from django.forms import forms
 from django.utils.translation import gettext_lazy as _
 from pathlib import Path
 import shutil
+from project.vod_settings import VOD_DB
 
 class VideoFileField(models.FileField):
     def __init__(self, *args, **kwargs):
@@ -37,7 +39,7 @@ class Video(models.Model):
         ('1080p', '1080p (1920x1080)'),
     ]
 
-    MAX_VIDEO_SIZE_MB = 100  # Maximum video size in MB
+    MAX_VIDEO_SIZE_MB = 2500  # Maximum video size in MB (2.5GB)
     
     caption = models.CharField(max_length=100)
     video = VideoFileField(
@@ -96,8 +98,8 @@ class Video(models.Model):
 
                         # Create necessary directories in web folder
                         year = datetime.now().strftime('%y')
-                        web_root = Path(settings.WEB_MEDIA_ROOT)
-                        web_output_dir = web_root / 'processed' / year
+                        media_root = Path(settings.MEDIA_ROOT)
+                        web_output_dir = media_root / 'processed' / year
                         web_output_dir.mkdir(parents=True, exist_ok=True)
                         
                         # Create a directory for the HLS segments
@@ -182,27 +184,72 @@ class Video(models.Model):
                         print(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
                         
                         # Run FFmpeg process with proper error handling
+                        # Set up environment with necessary paths
+                        env = os.environ.copy()
+                        env['PATH'] = '/usr/local/bin:/usr/bin:/bin:' + env.get('PATH', '')
+                        
                         process = subprocess.Popen(
                             ffmpeg_cmd,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             text=True,
-                            env={'PATH': os.environ.get('PATH', '')}
+                            env=env
                         )
                         
                         try:
                             print("FFmpeg process started...")
-                            stdout, stderr = process.communicate(timeout=300)
+                            stdout, stderr = process.communicate(timeout=7200)  # 2 hours timeout
                             
                             if process.returncode == 0:
                                 print("FFmpeg process completed successfully")
-                                # Set the processed_video URL using the web media URL
+                                # Set the processed_video URL using the media URL
                                 relative_path = f'processed/{year}/stream_{base_name}/{playlist_name}'
-                                self.processed_video = f"{settings.WEB_MEDIA_URL.rstrip('/')}/{relative_path}"
+                                self.processed_video = f"{settings.MEDIA_URL.rstrip('/')}/{relative_path}"
                                 super().save(update_fields=['processed_video'])
                                 
                                 # Ensure web server can read the files
                                 os.system(f'chmod -R 755 {stream_dir}')
+                                
+                                # Update VOD database
+                                try:
+                                    conn = mysql.connector.connect(
+                                        host=VOD_DB['host'],
+                                        port=VOD_DB['port'],
+                                        database=VOD_DB['database'],
+                                        user=VOD_DB['user'],
+                                        password=VOD_DB['password']
+                                    )
+                                    
+                                    cursor = conn.cursor()
+                                    
+                                    # Insert into multimedia table
+                                    insert_query = """
+                                        INSERT INTO multimedia 
+                                        (judul, link, status, created_at, updated_at, kategori_id, views)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                    """
+                                    
+                                    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    
+                                    cursor.execute(insert_query, (
+                                        self.caption,  # judul
+                                        f"http://202.169.232.239:8047/media/{relative_path}",  # link
+                                        'Aktif',  # status
+                                        current_time,  # created_at
+                                        current_time,  # updated_at
+                                        2,  # kategori_id (default to 2 - adjust as needed)
+                                        0  # views
+                                    ))
+                                    
+                                    conn.commit()
+                                    print("Successfully synced with VOD database")
+                                    
+                                except mysql.connector.Error as err:
+                                    print(f"Error updating VOD database: {err}")
+                                finally:
+                                    if 'conn' in locals() and conn.is_connected():
+                                        cursor.close()
+                                        conn.close()
                                 
                             else:
                                 print(f"FFmpeg Error: Process returned {process.returncode}")
